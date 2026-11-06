@@ -6,28 +6,41 @@ import qs.Commons as Commons
 import qs.Ui
 import "Model.js" as Model
 
-// The Lighting app's controls in the bar. Everything goes through the
-// `lighting` command line (https://github.com/cylon58/lighting), which talks
-// to OpenRGB; this widget only reads `lighting status --json` and runs
-// `lighting on|off|set`. Without the app it says so instead of doing nothing.
+// The PC's RGB lights in the bar, through OpenRGB (https://openrgb.org).
+// The widget keeps its own settings, starts OpenRGB's server when nothing
+// else has, and sends the saved look whenever the devices change (at login,
+// after a replug, after OpenRGB restarts). Without OpenRGB it offers to
+// install it.
 Panel {
   id: root
   moduleName: "cylon58.lighting"
   ipcTarget: "cylon58.lighting"
 
-  property bool loaded: false
-  property var state: Model.parseStatus(0, "")
+  readonly property string home: Quickshell.env("HOME") || ""
+  readonly property string stateDir: (Quickshell.env("XDG_STATE_HOME") || home + "/.local/state") + "/omarchy-lighting"
+  readonly property string statePath: stateDir + "/state.json"
+  // The Lighting app's settings, read once so its look carries over.
+  readonly property string legacyPath: (Quickshell.env("XDG_CONFIG_HOME") || home + "/.config") + "/lighting/state.json"
 
-  readonly property bool installed: state.installed
-  readonly property bool connected: state.connected
-  readonly property var devices: state.devices
-  readonly property bool anyLit: Model.anyLit(state)
-  readonly property string commonColor: Model.commonColor(state)
-  readonly property var brightnessInfo: Model.brightnessSummary(state)
-  readonly property string statusText: Model.statusText(state, loaded)
-  // What the slider shows while dragging, before the next status read.
-  property int pendingBrightness: -1
-  readonly property int brightness: pendingBrightness >= 0 ? pendingBrightness : brightnessInfo.value
+  // What the user asked for, and what OpenRGB reports.
+  property var saved: Model.defaultSettings()
+  property bool savedReady: false
+  property var deviceList: []
+  // "unknown" until the first check, then missing / starting / ready / error.
+  property string status: "unknown"
+  property string problem: ""
+  // The device list the saved look was last sent to; a new list re-sends it.
+  property string appliedSignature: ""
+
+  readonly property var lights: Model.view(saved, deviceList, status, problem)
+  readonly property bool installed: lights.installed
+  readonly property bool connected: lights.connected
+  readonly property var devices: lights.devices
+  readonly property bool anyLit: Model.anyLit(lights)
+  readonly property string commonColor: Model.commonColor(lights)
+  readonly property var brightnessInfo: Model.brightnessSummary(lights)
+  readonly property string statusText: status === "unknown" ? "…" : Model.statusText(lights)
+  readonly property int brightness: brightnessInfo.value
 
   readonly property var presets: ["#ffffff", "#ffb36b", "#ff0000", "#ff6a00", "#ffd000",
                                   "#00ff3c", "#00e5ff", "#0040ff", "#8c00ff", "#ff2fa8"]
@@ -36,119 +49,180 @@ Panel {
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
 
   function dotColor(d) {
-    var rgb = Model.dotRgb(state, d)
+    var rgb = Model.dotRgb(lights, d)
     return rgb ? Qt.rgba(rgb[0], rgb[1], rgb[2], 1) : dim
   }
 
-  // Set when a status read is asked for while one is already running: that
-  // read may have loaded the state before the latest change was saved.
-  property bool refreshAgain: false
-  // The last command's error, shown until a command succeeds.
-  property string actionError: ""
-  readonly property bool busy: actionProc.running || queue.length > 0 || brightnessDebounce.running
+  // ---------- Changes ----------
 
-  function refresh() {
-    if (statusProc.running) refreshAgain = true
-    else statusProc.running = true
+  // Every change saves the whole look and sends it to every device, so the
+  // newest change always wins and nothing has to be queued.
+  function change(next) {
+    if (!savedReady || !connected) return
+    saved = next
+    stateFile.setText(Model.settingsText(next))
+    sendSoon.restart()
   }
+  function setMaster(on) { change(Model.setMaster(saved, on)) }
+  function setDevice(key, on) { change(Model.setDevice(saved, key, on)) }
+  function setBrightness(level) { change(Model.setBrightnessForAll(saved, level)) }
+  function setColor(hex) { change(Model.setColorForAll(saved, hex)) }
 
-  function applyStatus(exitCode, text) {
-    loaded = true
-    // While changes are still going out, a read would show the old state
-    // and flick the switches back; read again once they're done instead.
-    if (busy) {
-      refreshAgain = true
+  property bool sendAgain: false
+  function send() {
+    if (!savedReady || status !== "ready" || deviceList.length === 0) return
+    if (applyProc.running) {
+      sendAgain = true
       return
     }
-    state = Model.parseStatus(exitCode, text)
-    pendingBrightness = -1
+    var args = Model.applyArgs(saved, deviceList)
+    if (args.length === 0) return
+    appliedSignature = Model.deviceSignature(deviceList)
+    applyProc.command = ["bash", "-c",
+      "ss -Hltn \"sport = :6742\" | grep -q . || exit 75; " +
+      "QT_QPA_PLATFORM=offscreen exec openrgb \"$@\"", "openrgb"].concat(args)
+    applyProc.running = true
   }
 
-  // Commands run one at a time, in order. Repeated brightness changes are
-  // merged so a dragged slider can't pile up dozens of them.
-  property var queue: []
-  function run(args) {
-    if (!installed) return
-    queue = Model.enqueue(queue, args)
-    if (!actionProc.running) startNext()
-  }
-  function startNext() {
-    if (queue.length === 0) {
-      refresh()
-      return
-    }
-    var next = queue[0]
-    queue = queue.slice(1)
-    // Through sh so a missing `lighting` still ends with an exit code
-    // (Quickshell reports nothing for a program that can't start).
-    actionProc.command = ["sh", "-c", "command -v lighting >/dev/null 2>&1 || exit 127; exec lighting \"$@\"", "lighting"].concat(next)
-    actionProc.running = true
+  function check() {
+    if (!checkProc.running) checkProc.running = true
   }
 
-  function setMaster(on) {
-    if (!installed || !connected) return
-    state = Model.withMaster(state, on)
-    run([on ? "on" : "off"])
-  }
-  function setDevice(key, on) {
-    run([on ? "on" : "off", "--device", key])
-  }
-  function setBrightness(level) {
-    pendingBrightness = Model.clampBrightness(level)
-    brightnessDebounce.restart()
-  }
-  function setColor(hex) {
-    run(["set", "--color", hex])
-  }
-  function openApp() {
+  function installOpenRgb() {
     close()
-    if (bar) bar.run("setsid -f lighting open >/dev/null 2>&1")
+    // Omarchy's own installer in a terminal, where the password is asked;
+    // then the udev rules and i2c module OpenRGB ships, so most lights are
+    // reachable without waiting for a restart.
+    Quickshell.execDetached(["bash", "-lc", "omarchy-launch-floating-terminal-with-presentation " +
+      "'omarchy-pkg-add openrgb && sudo udevadm control --reload && sudo udevadm trigger && sudo modprobe i2c-dev'"])
+    installWatch.restart()
   }
 
-  onOpenedChanged: if (opened) refresh()
+  onOpenedChanged: if (opened) check()
 
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
 
+  FileView {
+    id: stateFile
+    path: root.statePath
+    atomicWrites: true
+    printErrors: false
+    onLoaded: {
+      root.saved = Model.parseSettings(text())
+      root.savedReady = true
+      root.send()
+    }
+    // No settings of our own yet: start from the Lighting app's, if any.
+    onLoadFailed: legacyFile.path = root.legacyPath
+  }
+
+  FileView {
+    id: legacyFile
+    printErrors: false
+    onLoaded: {
+      root.saved = Model.parseSettings(text())
+      root.savedReady = true
+      root.send()
+    }
+    onLoadFailed: {
+      root.savedReady = true
+      root.send()
+    }
+  }
+
+  // Finds OpenRGB, starts its server when nothing listens on its port, and
+  // lists the devices. `openrgb` joins a running server on its own (it would
+  // scan the hardware itself without one, hence the port check); --client
+  // would join it a second time and list every device twice. Exit 127: not installed; 75: server not answering
+  // yet (it takes a few seconds to find the hardware); 70: couldn't start.
   Process {
-    id: statusProc
-    // 127 means the app isn't on PATH; that's shown, not hidden.
-    command: ["sh", "-c", "command -v lighting >/dev/null 2>&1 || exit 127; exec lighting status --json"]
-    stdout: StdioCollector { id: statusOut }
+    id: checkProc
+    command: ["bash", "-c",
+      "mkdir -p \"$1\"; command -v openrgb >/dev/null 2>&1 || exit 127; " +
+      "if ! ss -Hltn \"sport = :6742\" | grep -q .; then " +
+      "  if ! systemctl --user -q is-active cylon58-lighting-openrgb.service; then " +
+      "    systemctl --user reset-failed cylon58-lighting-openrgb.service 2>/dev/null; " +
+      "    systemd-run --user --quiet --unit=cylon58-lighting-openrgb --setenv=QT_QPA_PLATFORM=offscreen " +
+      "      openrgb --server --server-host 127.0.0.1 --noautoconnect || exit 70; " +
+      "  fi; exit 75; " +
+      "fi; " +
+      "QT_QPA_PLATFORM=offscreen exec openrgb -ld",
+      "check", root.stateDir]
+    stdout: StdioCollector { id: checkOut }
+    stderr: StdioCollector { id: checkErr }
     onExited: function(code) {
-      root.applyStatus(code, statusOut.text)
-      if (root.refreshAgain && !root.busy) {
-        root.refreshAgain = false
-        statusProc.running = true
+      // Whenever OpenRGB isn't answering, its devices will need the look
+      // again once it is (it forgets colors when it restarts).
+      if (code !== 0) root.appliedSignature = ""
+      if (code === 127) {
+        root.status = "missing"
+        root.deviceList = []
+      } else if (code === 75) {
+        root.status = "starting"
+        warm.restart()
+      } else if (code === 70) {
+        root.status = "error"
+        root.problem = "Couldn't start OpenRGB's server"
+      } else if (code !== 0) {
+        root.status = "error"
+        root.problem = String(checkErr.text).split("\n")[0] || "OpenRGB didn't answer"
+      } else {
+        if (root.status !== "ready") warm.restart()
+        root.status = "ready"
+        root.problem = ""
+        root.deviceList = Model.parseDeviceList(checkOut.text)
+        if (Model.deviceSignature(root.deviceList) !== root.appliedSignature) root.send()
       }
     }
   }
 
   Process {
-    id: actionProc
-    stderr: StdioCollector { id: actionErr }
+    id: applyProc
+    stderr: StdioCollector { id: applyErr }
     onExited: function(code) {
-      if (code === 127) root.actionError = "The lighting command isn't installed"
-      else if (code !== 0) root.actionError = String(actionErr.text).replace(/^lighting: /, "").split("\n")[0] || "Couldn't change the lights"
-      else root.actionError = ""
-      root.startNext()
+      if (code !== 0) {
+        // Try again on the next check rather than giving up on this look.
+        root.appliedSignature = ""
+        root.problem = code === 75 ? "OpenRGB stopped answering"
+          : (String(applyErr.text).split("\n")[0] || "Couldn't change the lights")
+      } else if (root.status === "ready") {
+        root.problem = ""
+      }
+      if (root.sendAgain) {
+        root.sendAgain = false
+        root.send()
+      }
     }
   }
 
+  // Groups a dragged slider's steps into a few sends.
   Timer {
-    id: brightnessDebounce
-    interval: 120
-    onTriggered: root.run(["set", "--brightness", String(root.pendingBrightness)])
+    id: sendSoon
+    interval: 60
+    onTriggered: root.send()
   }
 
-  // Keeps the bulb honest when something else (the app, a keybinding)
-  // changes the lights; faster while the panel is open.
+  // Checks often for a minute after OpenRGB starts, while it is still
+  // finding devices, so each one lights up as soon as it appears.
   Timer {
-    interval: root.opened ? 3000 : 30000
+    id: warm
+    interval: 60000
+    running: true
+  }
+
+  // After the install terminal opens, look for OpenRGB every few seconds.
+  Timer {
+    id: installWatch
+    interval: 300000
+  }
+
+  Timer {
+    interval: root.opened ? 3000 : (warm.running || installWatch.running || root.status === "starting" || root.status === "unknown") ? 2000 : 60000
     running: true
     repeat: true
     triggeredOnStart: true
-    onTriggered: root.refresh()
+    onTriggered: root.check()
   }
 
   BarIconButton {
@@ -161,7 +235,6 @@ Panel {
     tooltipText: ""
     onPressed: function(b) {
       if (b === Qt.RightButton) root.setMaster(!root.anyLit)
-      else if (b === Qt.MiddleButton) root.openApp()
       else root.toggle()
     }
     onWheelMoved: function(delta) {
@@ -251,15 +324,21 @@ Panel {
             anchors.right: parent.right
             anchors.verticalCenter: parent.verticalCenter
             checked: root.anyLit
-            busy: actionProc.running
+            busy: applyProc.running
             foreground: root.foreground
             onToggled: root.setMaster(!root.anyLit)
           }
         }
 
-        // ---------- Missing app or server: say what to do ----------
+        // ---------- Missing OpenRGB or no lights: say what to do ----------
         Text {
-          visible: !root.installed || (root.loaded && !root.connected) || root.actionError !== ""
+          visible: info !== ""
+          readonly property string info: !root.installed
+            ? "OpenRGB talks to the lights. Install it, then restart the PC once so it can reach every device."
+            : root.problem !== "" ? root.problem
+            : root.connected && root.devices.length === 0
+            ? "OpenRGB found no RGB devices. A device that was just plugged in may need a restart."
+            : ""
           width: parent.width
           wrapMode: Text.Wrap
           textFormat: Text.PlainText
@@ -267,11 +346,19 @@ Panel {
           opacity: 0.75
           font.family: root.fontFamily
           font.pixelSize: Style.font.bodySmall
-          text: root.actionError !== "" && root.installed && root.connected
-            ? root.actionError
-            : !root.installed
-            ? "This widget drives the Lighting app. Install it from github.com/cylon58/lighting, then reopen this panel."
-            : (root.state.problem !== "" ? root.state.problem : "Start OpenRGB with: systemctl --user start lighting-server")
+          text: info
+        }
+
+        Button {
+          visible: root.status === "missing"
+          width: parent.width
+          text: "Install OpenRGB"
+          iconText: "󰏔"
+          foreground: root.foreground
+          fontFamily: root.fontFamily
+          fontSize: Style.font.bodySmall
+          bordered: true
+          onClicked: root.installOpenRgb()
         }
 
         // ---------- Devices ----------
@@ -342,7 +429,7 @@ Panel {
             Text {
               anchors.right: parent.right
               anchors.verticalCenter: brightnessHeader.verticalCenter
-              text: root.brightnessInfo.mixed && root.pendingBrightness < 0 ? "Mixed" : root.brightness + "%"
+              text: root.brightnessInfo.mixed ? "Mixed" : root.brightness + "%"
               textFormat: Text.PlainText
               color: root.foreground
               font.family: root.fontFamily
@@ -406,18 +493,6 @@ Panel {
           }
         }
 
-        // ---------- Everything else lives in the app ----------
-        Button {
-          visible: root.installed
-          width: parent.width
-          text: "Open Lighting"
-          iconText: "󰏘"
-          foreground: root.foreground
-          fontFamily: root.fontFamily
-          fontSize: Style.font.bodySmall
-          bordered: true
-          onClicked: root.openApp()
-        }
       }
     }
   }

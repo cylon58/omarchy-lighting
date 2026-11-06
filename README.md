@@ -3,27 +3,20 @@
 ![Lighting panel](preview.png)
 
 A lightbulb in the bar for your PC's RGB lights: switch everything (or one
-device) on or off, set brightness, and pick a color, without opening an app.
-
-It is the bar side of [Lighting](https://github.com/cylon58/lighting), which
-does the work through [OpenRGB](https://openrgb.org). Install that first.
+device) on or off, set brightness, and pick a color. It works through
+[OpenRGB](https://openrgb.org), which knows how to talk to most graphics
+cards, motherboards, RAM, keyboards, mice and LED strips.
 
 ## Install
 
-1. Install the Lighting app (it needs your password once: it pulls in OpenRGB,
-   whose udev rules let your user reach the lights):
+```sh
+omarchy plugin add https://github.com/cylon58/omarchy-lighting.git --enable
+```
 
-   ```sh
-   git clone https://github.com/cylon58/lighting.git && lighting/bin/install
-   ```
-
-2. Add the widget:
-
-   ```sh
-   omarchy plugin add https://github.com/cylon58/omarchy-lighting.git --enable
-   ```
-
-Without the app, the panel says so and points here.
+Then click the bulb. If OpenRGB isn't installed, the panel has an
+**Install OpenRGB** button: it opens a terminal, asks for your password once,
+installs the `openrgb` package and loads its device rules. Restart the PC once
+afterwards so every device is reachable.
 
 ## Use
 
@@ -31,26 +24,38 @@ Without the app, the panel says so and points here.
 | --- | --- |
 | Click | Open the panel |
 | Right-click | All lights on or off |
-| Middle-click | Open the Lighting app |
 | Scroll | Brighter or dimmer |
 
 In the panel, the top switch is the master switch, each device has its own
 switch, and the slider and colors apply to every device. Brightness reads
-"Mixed" when devices differ; moving it sets them all. Per-device color and
-brightness live in the app ("Open Lighting").
+"Mixed" when devices differ; moving it sets them all. Turning everything off
+keeps each device's look, so it comes back the same.
 
-## What it runs
+Devices OpenRGB finds with no LEDs set up (an empty motherboard header) get no
+switch. To use one, set its size once in the OpenRGB app.
 
-Only the `lighting` command: `lighting status --json` every 30 seconds (every
-3 while the panel is open), and `lighting on|off|set` when you change
-something. It writes no settings of its own; the app keeps the state in
-`~/.config/lighting/state.json`.
+## What it runs and writes
+
+- Starts OpenRGB's server when nothing is listening on its port (127.0.0.1:6742), as
+  the user service `cylon58-lighting-openrgb`, which lasts until you log out.
+  An OpenRGB server you already run is used as it is.
+- Runs `openrgb -ld` to list devices: every 2 seconds for a minute after
+  OpenRGB starts, every 3 seconds while the panel is open, and once a minute
+  otherwise. When the list changes (at login, after a replug) it sends your
+  look again with `openrgb -d N -c RRGGBB`.
+- Saves your settings to `~/.local/state/omarchy-lighting/state.json`. The
+  first time, it starts from the settings of the
+  [Lighting app](https://github.com/cylon58/lighting) if you had it.
 
 ## Remove
 
 ```sh
 omarchy plugin remove cylon58.lighting
+rm -r ~/.local/state/omarchy-lighting
 ```
+
+OpenRGB stays installed; remove it with `sudo pacman -R openrgb` if nothing
+else uses it.
 
 ## Develop
 
