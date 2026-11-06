@@ -46,8 +46,8 @@ switch. To use one, set its size once in the OpenRGB app.
   restarts or the PC wakes from sleep, it sends your look again with
   `openrgb -d N -c RRGGBB`.
 - Saves your settings to `~/.local/state/omarchy-lighting/state.json`. The
-  first time, it starts from the settings of the
-  [Lighting app](https://github.com/cylon58/lighting) if you had it.
+  first time, it starts from the settings of the older Lighting app
+  (`~/.config/lighting/state.json`) if you had it.
 
 ## Remove
 
