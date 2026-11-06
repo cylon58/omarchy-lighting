@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "id": "cylon58.lighting",
+  "name": "Lighting",
+  "version": "0.1.0",
+  "author": "cylon58",
+  "license": "MIT",
+  "description": "Switch the PC's RGB lights on and off and set their color and brightness from the bar, through the Lighting app and OpenRGB.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Lighting",
+    "description": "RGB lights on or off, per-device switches, brightness and color presets.",
+    "category": "System",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}
