@@ -1,50 +1,233 @@
 // Pure logic for the Lighting widget, shared by Panel.qml and the Node tests
 // (MODEL_PATH=Model.js node --test tests/model.test.cjs).
+//
+// Two things are kept apart: the saved settings (what the user asked for,
+// stored as JSON) and the devices OpenRGB reports right now. The panel shows
+// a view built from both, and applyArgs turns both into one `openrgb` call.
 
-// Turns `lighting status --json` output into the widget's state. exitCode
-// 127 means the `lighting` command isn't installed.
-function parseStatus(exitCode, text) {
-  var state = {
-    installed: exitCode !== 127,
-    connected: false,
-    problem: "",
-    masterOn: false,
-    brightness: 100,
-    sharedColor: "#ffffff",
-    devices: []
+// ---------- Saved settings ----------
+
+// The shared look ("All") plus any device that was given its own. Same
+// format as the Lighting app's ~/.config/lighting/state.json, so its
+// settings carry over.
+function defaultSettings() {
+  return { on: true, color: "#ffffff", brightness: 100, devices: {} }
+}
+
+function normalColor(value, fallback) {
+  var s = String(value || "").trim().toLowerCase()
+  if (s && s[0] !== "#") s = "#" + s
+  return /^#[0-9a-f]{6}$/.test(s) ? s : fallback
+}
+
+function clampBrightness(level) {
+  return Math.max(0, Math.min(100, Math.round(Number(level) || 0)))
+}
+
+function readLook(obj, fallback) {
+  obj = obj && typeof obj === "object" ? obj : {}
+  return {
+    on: typeof obj.on === "boolean" ? obj.on : fallback.on,
+    color: normalColor(obj.color, fallback.color),
+    brightness: typeof obj.brightness === "number" ? clampBrightness(obj.brightness) : fallback.brightness
   }
-  if (!state.installed) return state
+}
+
+// Saved JSON to settings; anything unreadable falls back to the defaults.
+function parseSettings(text) {
   var data = null
   try { data = JSON.parse(String(text || "")) } catch (e) { data = null }
-  if (!data || typeof data !== "object") {
-    state.problem = "Couldn't read lighting status"
-    return state
+  var base = readLook(data, defaultSettings())
+  var settings = { on: base.on, color: base.color, brightness: base.brightness, devices: {} }
+  var list = data && data.devices && typeof data.devices === "object" ? data.devices : {}
+  for (var key in list) settings.devices[key] = readLook(list[key], lookBase(settings))
+  return settings
+}
+
+function settingsText(settings) {
+  return JSON.stringify(settings, null, 2) + "\n"
+}
+
+function lookBase(settings) {
+  return { on: true, color: settings.color, brightness: settings.brightness }
+}
+
+// A device's own look, or the shared one when it has none.
+function lookFor(settings, key) {
+  var own = settings.devices[key]
+  return own ? { on: own.on, color: own.color, brightness: own.brightness } : lookBase(settings)
+}
+
+function copySettings(settings) {
+  var next = { on: settings.on, color: settings.color, brightness: settings.brightness, devices: {} }
+  for (var key in settings.devices) next.devices[key] = lookFor(settings, key)
+  return next
+}
+
+// "All on" brings back devices switched off on their own too; "all off" only
+// flips the master switch, so each device's setting is there when it returns.
+function setMaster(settings, on) {
+  var next = copySettings(settings)
+  next.on = on
+  if (on) for (var key in next.devices) next.devices[key].on = true
+  // Turning on at 0% would change nothing you can see.
+  if (on && next.brightness === 0) {
+    var dark = true
+    for (var k in next.devices) if (next.devices[k].brightness > 0) dark = false
+    if (dark) return setBrightnessForAll(next, 100)
   }
-  state.connected = data.connected === true
-  state.problem = data.error ? String(data.error) : ""
-  state.masterOn = data.on === true
-  if (typeof data.brightness === "number") state.brightness = data.brightness
-  if (data.color) state.sharedColor = String(data.color).toLowerCase()
-  var raw = data.devices instanceof Array ? data.devices : []
-  for (var i = 0; i < raw.length; i++) {
-    var d = raw[i] || {}
-    // Devices with no LEDs set up in OpenRGB have nothing to switch.
-    if (!((d.leds || 0) > 0)) continue
+  return next
+}
+
+// Switching one device on while everything is off brings the rest back too;
+// otherwise the switch would do nothing you can see.
+function setDevice(settings, key, on) {
+  var next = copySettings(settings)
+  var look = lookFor(next, key)
+  look.on = on
+  next.devices[key] = look
+  if (on) next.on = true
+  return next
+}
+
+function setColorForAll(settings, hex) {
+  var next = copySettings(settings)
+  next.color = normalColor(hex, next.color)
+  for (var key in next.devices) next.devices[key].color = next.color
+  return next
+}
+
+function setBrightnessForAll(settings, level) {
+  var next = copySettings(settings)
+  next.brightness = clampBrightness(level)
+  for (var key in next.devices) next.devices[key].brightness = next.brightness
+  return next
+}
+
+// ---------- OpenRGB's device list ----------
+
+var TYPE_LABELS = {
+  "motherboard": "Motherboard", "dram": "Memory", "gpu": "Graphics card",
+  "cooler": "Cooler", "led strip": "LED strip", "keyboard": "Keyboard",
+  "mouse": "Mouse", "mousemat": "Mousepad", "headset": "Headset",
+  "headset stand": "Headset stand", "gamepad": "Controller", "light": "Light",
+  "speaker": "Speaker", "storage": "Drive", "case": "Case",
+  "microphone": "Microphone", "keypad": "Keypad"
+}
+
+// Reads `openrgb -ld`. Each device starts with "N: name" at the start of a
+// line; its details are indented. A device with no LEDs set up (an empty
+// motherboard header) has no "LEDs:" line and gets no switch.
+//
+// Keys are the device name, which survives reboots and reordering; a second
+// identical device gets " 2". Labels are the short type name, numbered when
+// a type repeats. Both match the Lighting app, so its settings carry over.
+function parseDeviceList(text) {
+  var found = []
+  var lines = String(text || "").split("\n")
+  var current = null
+  for (var i = 0; i < lines.length; i++) {
+    var line = lines[i]
+    var head = /^(\d+): (.*\S)\s*$/.exec(line)
+    if (head) {
+      current = { index: Number(head[1]), name: head[2], type: "", hasLeds: false }
+      found.push(current)
+      continue
+    }
+    if (!current) continue
+    var type = /^\s+Type:\s+(.*\S)\s*$/.exec(line)
+    if (type) current.type = type[1]
+    else if (/^\s+LEDs:\s*\S/.test(line)) current.hasLeds = true
+  }
+
+  var used = {}, seen = {}, typeCount = {}, typeSeen = {}
+  found.forEach(function(d) {
+    used[d.name] = true
+    var label = TYPE_LABELS[d.type.toLowerCase()] || ""
+    if (label) typeCount[label] = (typeCount[label] || 0) + 1
+  })
+  found.forEach(function(d) {
+    seen[d.name] = (seen[d.name] || 0) + 1
+    if (seen[d.name] === 1) {
+      d.key = d.name
+    } else {
+      var n = seen[d.name]
+      while (used[d.name + " " + n]) n++
+      d.key = d.name + " " + n
+      used[d.key] = true
+    }
+    var label = TYPE_LABELS[d.type.toLowerCase()] || ""
+    if (!label) d.label = d.name
+    else if (typeCount[label] > 1) d.label = label + " " + (typeSeen[label] = (typeSeen[label] || 0) + 1)
+    else d.label = label
+  })
+  return found
+}
+
+// What a device should show: its color scaled by brightness, or black.
+function outputHex(settings, key) {
+  var look = lookFor(settings, key)
+  if (!settings.on || !look.on) return "000000"
+  var hex = look.color.replace("#", "")
+  var scale = look.brightness / 100
+  var out = ""
+  for (var i = 0; i < 6; i += 2) {
+    var v = Math.round(parseInt(hex.slice(i, i + 2), 16) * scale)
+    out += (v < 16 ? "0" : "") + v.toString(16)
+  }
+  return out
+}
+
+// The arguments for one `openrgb` call that sets every device with LEDs.
+function applyArgs(settings, devices) {
+  var args = []
+  devices.forEach(function(d) {
+    if (d.hasLeds) args.push("-d", String(d.index), "-c", outputHex(settings, d.key))
+  })
+  return args
+}
+
+// Changes when a device appears, goes or is renumbered: the moment the
+// saved look has to be sent again (login, replug, OpenRGB restart).
+function deviceSignature(devices) {
+  return devices.filter(function(d) { return d.hasLeds })
+    .map(function(d) { return d.index + "=" + d.key }).join("\n")
+}
+
+// ---------- What the panel shows ----------
+
+// status: "missing" (OpenRGB isn't installed), "starting" (its server isn't
+// answering yet), "ready", or "error" with a problem message.
+function view(settings, devices, status, problem) {
+  var state = {
+    installed: status !== "missing",
+    connected: status === "ready",
+    status: status,
+    problem: problem || "",
+    masterOn: settings.on,
+    brightness: settings.brightness,
+    sharedColor: settings.color,
+    devices: []
+  }
+  devices.forEach(function(d) {
+    if (!d.hasLeds) return
+    var look = lookFor(settings, d.key)
     state.devices.push({
-      key: String(d.key || d.name || ""),
-      label: String(d.label || d.name || ""),
-      on: d.on === true,
-      color: String(d.color || state.sharedColor).toLowerCase(),
-      brightness: typeof d.brightness === "number" ? d.brightness : state.brightness
+      key: d.key,
+      label: d.label,
+      // A device reads as on only when the master switch is on too.
+      on: settings.on && look.on,
+      color: look.color,
+      brightness: look.brightness
     })
-  }
+  })
   return state
 }
 
-// Lit means the master switch is on and at least one device is on, so the
-// bulb and the main switch match what the PC actually shows.
+// Lit means OpenRGB is answering, the master switch is on and at least one
+// device is on, so the bulb and the main switch match what the PC shows.
 function anyLit(state) {
-  if (!state.masterOn) return false
+  if (!state.connected || !state.masterOn) return false
   if (state.devices.length === 0) return state.brightness > 0
   for (var i = 0; i < state.devices.length; i++)
     if (state.devices[i].on && state.devices[i].brightness > 0) return true
@@ -57,39 +240,6 @@ function litCount(state) {
   for (var i = 0; i < state.devices.length; i++)
     if (state.devices[i].on && state.devices[i].brightness > 0) n++
   return n
-}
-
-// What the panel shows right after the master switch is flipped, before the
-// next status read: `lighting on` brings every device back too, and a
-// device's `on` in the status already includes the master switch.
-function withMaster(state, on) {
-  var next = {}
-  for (var k in state) next[k] = state[k]
-  next.masterOn = on
-  next.devices = state.devices.map(function(d) {
-    var copy = {}
-    for (var key in d) copy[key] = d[key]
-    copy.on = on
-    return copy
-  })
-  return next
-}
-
-// Adds a command to the waiting list. Brightness changes replace a waiting
-// brightness change (only the newest level matters); everything else keeps
-// its place, so a color or a device switch is never dropped.
-function enqueue(queue, args) {
-  var next = queue.slice()
-  if (args[0] === "set" && args[1] === "--brightness") {
-    for (var i = 0; i < next.length; i++) {
-      if (next[i][0] === "set" && next[i][1] === "--brightness") {
-        next[i] = args
-        return next
-      }
-    }
-  }
-  next.push(args)
-  return next
 }
 
 // The color every device shares, or "" when they differ.
@@ -113,12 +263,13 @@ function brightnessSummary(state) {
   return { value: max, mixed: mixed }
 }
 
-function statusText(state, loaded) {
-  if (!state.installed) return "App not installed"
-  if (!state.connected) return loaded ? "OpenRGB not reachable" : "…"
+function statusText(state) {
+  if (!state.installed) return "OpenRGB not installed"
+  if (state.status === "starting") return "Starting OpenRGB…"
+  if (!state.connected) return "OpenRGB not reachable"
+  if (state.devices.length === 0) return "No lights found"
   if (!anyLit(state)) return "Off"
   var n = litCount(state)
-  if (state.devices.length === 0) return "On"
   return n === 1 ? "On · 1 device" : "On · " + n + " devices"
 }
 
@@ -136,21 +287,27 @@ function dotRgb(state, device) {
   ]
 }
 
-function clampBrightness(level) {
-  return Math.max(0, Math.min(100, Math.round(Number(level) || 0)))
-}
-
 if (typeof module !== "undefined") {
   module.exports = {
-    parseStatus: parseStatus,
+    defaultSettings: defaultSettings,
+    parseSettings: parseSettings,
+    settingsText: settingsText,
+    lookFor: lookFor,
+    setMaster: setMaster,
+    setDevice: setDevice,
+    setColorForAll: setColorForAll,
+    setBrightnessForAll: setBrightnessForAll,
+    clampBrightness: clampBrightness,
+    parseDeviceList: parseDeviceList,
+    outputHex: outputHex,
+    applyArgs: applyArgs,
+    deviceSignature: deviceSignature,
+    view: view,
     anyLit: anyLit,
     litCount: litCount,
     commonColor: commonColor,
     brightnessSummary: brightnessSummary,
     statusText: statusText,
-    dotRgb: dotRgb,
-    clampBrightness: clampBrightness,
-    withMaster: withMaster,
-    enqueue: enqueue
+    dotRgb: dotRgb
   }
 }
