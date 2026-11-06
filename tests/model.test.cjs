@@ -135,9 +135,14 @@ test("the bulb is lit only when something is", () => {
   assert.equal(Model.dotRgb(ready(s), ready(s).devices[0]), null)
 })
 
-test("lights at 0% brightness count as dark", () => {
+test("lights at 0% brightness count as dark, and switching on lights them", () => {
   const s = Model.setBrightnessForAll(Model.parseSettings(appState), 0)
   assert.equal(Model.anyLit(ready(s)), false)
+  assert.equal(Model.anyLit(ready(Model.setMaster(s, true))), true)
+})
+
+test("the server line before the listing isn't a device", () => {
+  assert.deepEqual(Model.parseDeviceList("server 1234\n" + listing).map(d => d.index), [0, 1, 2, 3, 4])
 })
 
 test("a dim device's dot still shows its color", () => {

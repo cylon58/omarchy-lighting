@@ -41,8 +41,9 @@ switch. To use one, set its size once in the OpenRGB app.
   An OpenRGB server you already run is used as it is.
 - Runs `openrgb -ld` to list devices: every 2 seconds for a minute after
   OpenRGB starts, every 3 seconds while the panel is open, and once a minute
-  otherwise. When the list changes (at login, after a replug) it sends your
-  look again with `openrgb -d N -c RRGGBB`.
+  otherwise. When the list changes (at login, after a replug), OpenRGB
+  restarts or the PC wakes from sleep, it sends your look again with
+  `openrgb -d N -c RRGGBB`.
 - Saves your settings to `~/.local/state/omarchy-lighting/state.json`. The
   first time, it starts from the settings of the
   [Lighting app](https://github.com/cylon58/lighting) if you had it.

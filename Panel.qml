@@ -29,10 +29,19 @@ Panel {
   // "unknown" until the first check, then missing / starting / ready / error.
   property string status: "unknown"
   property string problem: ""
+  // The last send's error, kept until a send works (a good device list
+  // doesn't mean the lights took the look).
+  property string applyError: ""
+  // The server's process, so a restarted server gets the look again even
+  // when it lists the same devices.
+  property string serverPid: ""
+  // Servers started in a row without one answering; a server that keeps
+  // dying is reported instead of restarted every few seconds.
+  property int starts: 0
   // The device list the saved look was last sent to; a new list re-sends it.
   property string appliedSignature: ""
 
-  readonly property var lights: Model.view(saved, deviceList, status, problem)
+  readonly property var lights: Model.view(saved, deviceList, status, problem || applyError)
   readonly property bool installed: lights.installed
   readonly property bool connected: lights.connected
   readonly property var devices: lights.devices
@@ -77,11 +86,15 @@ Panel {
     }
     var args = Model.applyArgs(saved, deviceList)
     if (args.length === 0) return
-    appliedSignature = Model.deviceSignature(deviceList)
+    appliedSignature = signature()
     applyProc.command = ["bash", "-c",
       "ss -Hltn \"sport = :6742\" | grep -q . || exit 75; " +
-      "QT_QPA_PLATFORM=offscreen exec openrgb \"$@\"", "openrgb"].concat(args)
+      "QT_QPA_PLATFORM=offscreen exec timeout 15 openrgb \"$@\"", "openrgb"].concat(args)
     applyProc.running = true
+  }
+
+  function signature() {
+    return serverPid + "|" + Model.deviceSignature(deviceList)
   }
 
   function check() {
@@ -113,6 +126,7 @@ Panel {
       root.savedReady = true
       root.send()
     }
+    onSaveFailed: function(error) { root.applyError = "Couldn't save the settings" }
     // No settings of our own yet: start from the Lighting app's, if any.
     onLoadFailed: legacyFile.path = root.legacyPath
   }
@@ -134,8 +148,11 @@ Panel {
   // Finds OpenRGB, starts its server when nothing listens on its port, and
   // lists the devices. `openrgb` joins a running server on its own (it would
   // scan the hardware itself without one, hence the port check); --client
-  // would join it a second time and list every device twice. Exit 127: not installed; 75: server not answering
-  // yet (it takes a few seconds to find the hardware); 70: couldn't start.
+  // would join it a second time and list every device twice. The first
+  // line names the server's process. Exit 127: not installed; 75: server not
+  // answering yet (it takes a few seconds to find the hardware), after
+  // printing "started" if this check started it; 70: couldn't start; 124:
+  // OpenRGB didn't answer in time.
   Process {
     id: checkProc
     command: ["bash", "-c",
@@ -145,9 +162,11 @@ Panel {
       "    systemctl --user reset-failed cylon58-lighting-openrgb.service 2>/dev/null; " +
       "    systemd-run --user --quiet --unit=cylon58-lighting-openrgb --setenv=QT_QPA_PLATFORM=offscreen " +
       "      openrgb --server --server-host 127.0.0.1 --noautoconnect || exit 70; " +
+      "    echo started; " +
       "  fi; exit 75; " +
       "fi; " +
-      "QT_QPA_PLATFORM=offscreen exec openrgb -ld",
+      "pid=$(ss -Hltnp \"sport = :6742\" | grep -o 'pid=[0-9]*' | head -n 1); echo \"server ${pid#pid=}\"; " +
+      "QT_QPA_PLATFORM=offscreen exec timeout 15 openrgb -ld",
       "check", root.stateDir]
     stdout: StdioCollector { id: checkOut }
     stderr: StdioCollector { id: checkErr }
@@ -159,8 +178,17 @@ Panel {
         root.status = "missing"
         root.deviceList = []
       } else if (code === 75) {
-        root.status = "starting"
-        warm.restart()
+        if (String(checkOut.text).indexOf("started") >= 0) root.starts++
+        if (root.starts > 3) {
+          root.status = "error"
+          root.problem = "OpenRGB's server keeps stopping. Check: journalctl --user -u cylon58-lighting-openrgb"
+        } else {
+          root.status = "starting"
+          warm.restart()
+        }
+      } else if (code === 124) {
+        root.status = "error"
+        root.problem = "OpenRGB didn't answer"
       } else if (code === 70) {
         root.status = "error"
         root.problem = "Couldn't start OpenRGB's server"
@@ -171,8 +199,11 @@ Panel {
         if (root.status !== "ready") warm.restart()
         root.status = "ready"
         root.problem = ""
+        root.starts = 0
+        var pid = /^server (\d*)/m.exec(String(checkOut.text))
+        root.serverPid = pid ? pid[1] : ""
         root.deviceList = Model.parseDeviceList(checkOut.text)
-        if (Model.deviceSignature(root.deviceList) !== root.appliedSignature) root.send()
+        if (root.signature() !== root.appliedSignature) root.send()
       }
     }
   }
@@ -184,10 +215,11 @@ Panel {
       if (code !== 0) {
         // Try again on the next check rather than giving up on this look.
         root.appliedSignature = ""
-        root.problem = code === 75 ? "OpenRGB stopped answering"
+        root.applyError = code === 75 ? "OpenRGB stopped answering"
+          : code === 124 ? "OpenRGB didn't answer"
           : (String(applyErr.text).split("\n")[0] || "Couldn't change the lights")
-      } else if (root.status === "ready") {
-        root.problem = ""
+      } else {
+        root.applyError = ""
       }
       if (root.sendAgain) {
         root.sendAgain = false
@@ -222,7 +254,15 @@ Panel {
     running: true
     repeat: true
     triggeredOnStart: true
-    onTriggered: root.check()
+    // A tick far later than planned means the PC slept; many controllers
+    // forget their colors on wake, so send the look again.
+    property real lastTick: 0
+    onTriggered: {
+      var now = Date.now()
+      if (lastTick > 0 && now - lastTick > interval + 30000) root.appliedSignature = ""
+      lastTick = now
+      root.check()
+    }
   }
 
   BarIconButton {
@@ -238,7 +278,7 @@ Panel {
       else root.toggle()
     }
     onWheelMoved: function(delta) {
-      if (root.connected && root.anyLit) root.setBrightness(root.brightness + (delta > 0 ? 10 : -10))
+      if (root.connected && root.lights.masterOn) root.setBrightness(root.brightness + (delta > 0 ? 10 : -10))
     }
   }
 

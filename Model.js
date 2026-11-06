@@ -70,6 +70,12 @@ function setMaster(settings, on) {
   var next = copySettings(settings)
   next.on = on
   if (on) for (var key in next.devices) next.devices[key].on = true
+  // Turning on at 0% would change nothing you can see.
+  if (on && next.brightness === 0) {
+    var dark = true
+    for (var k in next.devices) if (next.devices[k].brightness > 0) dark = false
+    if (dark) return setBrightnessForAll(next, 100)
+  }
   return next
 }
 
