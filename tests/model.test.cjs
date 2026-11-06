@@ -84,3 +84,29 @@ test("brightness is clamped to 0-100", () => {
   assert.equal(Model.clampBrightness(-5), 0)
   assert.equal(Model.clampBrightness("42.6"), 43)
 })
+
+test("switching the master on shows every device on straight away", () => {
+  const s = Model.parseStatus(0, status)
+  const off = Model.withMaster(s, false)
+  assert.equal(Model.anyLit(off), false)
+  const on = Model.withMaster(off, true)
+  assert.equal(Model.anyLit(on), true)
+  assert.ok(on.devices.every(d => d.on))
+  assert.equal(s.masterOn, true, "the original state is not changed")
+})
+
+test("waiting commands keep their order; only brightness merges", () => {
+  let q = []
+  q = Model.enqueue(q, ["set", "--brightness", "40"])
+  q = Model.enqueue(q, ["set", "--color", "#ff0000"])
+  q = Model.enqueue(q, ["on", "--device", "Kbd"])
+  q = Model.enqueue(q, ["set", "--brightness", "70"])
+  assert.deepEqual(q, [["set", "--brightness", "70"], ["set", "--color", "#ff0000"], ["on", "--device", "Kbd"]])
+})
+
+test("lights at 0% brightness count as dark", () => {
+  const s = Model.parseStatus(0, status)
+  s.devices.forEach(d => { d.brightness = 0 })
+  assert.equal(Model.anyLit(s), false)
+  assert.equal(Model.statusText(s, true), "Off")
+})

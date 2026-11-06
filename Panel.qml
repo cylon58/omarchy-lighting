@@ -40,30 +40,54 @@ Panel {
     return rgb ? Qt.rgba(rgb[0], rgb[1], rgb[2], 1) : dim
   }
 
+  // Set when a status read is asked for while one is already running: that
+  // read may have loaded the state before the latest change was saved.
+  property bool refreshAgain: false
+  // The last command's error, shown until a command succeeds.
+  property string actionError: ""
+  readonly property bool busy: actionProc.running || queue.length > 0 || brightnessDebounce.running
+
   function refresh() {
-    if (!statusProc.running) statusProc.running = true
+    if (statusProc.running) refreshAgain = true
+    else statusProc.running = true
   }
 
   function applyStatus(exitCode, text) {
     loaded = true
+    // While changes are still going out, a read would show the old state
+    // and flick the switches back; read again once they're done instead.
+    if (busy) {
+      refreshAgain = true
+      return
+    }
     state = Model.parseStatus(exitCode, text)
-    // A status read that lands while a brightness change is still queued
-    // would snap the slider back; keep the dragged value until it's sent.
-    if (!brightnessDebounce.running && !actionProc.running) pendingBrightness = -1
+    pendingBrightness = -1
   }
 
-  // Commands run one at a time; while one runs, only the newest waiting
-  // command is kept, so a dragged slider can't pile up dozens of them.
-  property var pending: null
+  // Commands run one at a time, in order. Repeated brightness changes are
+  // merged so a dragged slider can't pile up dozens of them.
+  property var queue: []
   function run(args) {
     if (!installed) return
-    if (actionProc.running) { pending = args; return }
-    actionProc.command = ["lighting"].concat(args)
+    queue = Model.enqueue(queue, args)
+    if (!actionProc.running) startNext()
+  }
+  function startNext() {
+    if (queue.length === 0) {
+      refresh()
+      return
+    }
+    var next = queue[0]
+    queue = queue.slice(1)
+    // Through sh so a missing `lighting` still ends with an exit code
+    // (Quickshell reports nothing for a program that can't start).
+    actionProc.command = ["sh", "-c", "command -v lighting >/dev/null 2>&1 || exit 127; exec lighting \"$@\"", "lighting"].concat(next)
     actionProc.running = true
   }
 
   function setMaster(on) {
-    state = Object.assign({}, state, { masterOn: on })
+    if (!installed || !connected) return
+    state = Model.withMaster(state, on)
     run([on ? "on" : "off"])
   }
   function setDevice(key, on) {
@@ -91,20 +115,23 @@ Panel {
     // 127 means the app isn't on PATH; that's shown, not hidden.
     command: ["sh", "-c", "command -v lighting >/dev/null 2>&1 || exit 127; exec lighting status --json"]
     stdout: StdioCollector { id: statusOut }
-    onExited: function(code) { root.applyStatus(code, statusOut.text) }
+    onExited: function(code) {
+      root.applyStatus(code, statusOut.text)
+      if (root.refreshAgain && !root.busy) {
+        root.refreshAgain = false
+        statusProc.running = true
+      }
+    }
   }
 
   Process {
     id: actionProc
-    onExited: {
-      if (root.pending) {
-        var next = root.pending
-        root.pending = null
-        actionProc.command = ["lighting"].concat(next)
-        actionProc.running = true
-        return
-      }
-      root.refresh()
+    stderr: StdioCollector { id: actionErr }
+    onExited: function(code) {
+      if (code === 127) root.actionError = "The lighting command isn't installed"
+      else if (code !== 0) root.actionError = String(actionErr.text).replace(/^lighting: /, "").split("\n")[0] || "Couldn't change the lights"
+      else root.actionError = ""
+      root.startNext()
     }
   }
 
@@ -138,7 +165,7 @@ Panel {
       else root.toggle()
     }
     onWheelMoved: function(delta) {
-      if (root.connected) root.setBrightness(root.brightness + (delta > 0 ? 10 : -10))
+      if (root.connected && root.anyLit) root.setBrightness(root.brightness + (delta > 0 ? 10 : -10))
     }
   }
 
@@ -232,7 +259,7 @@ Panel {
 
         // ---------- Missing app or server: say what to do ----------
         Text {
-          visible: !root.installed || (root.loaded && !root.connected)
+          visible: !root.installed || (root.loaded && !root.connected) || root.actionError !== ""
           width: parent.width
           wrapMode: Text.Wrap
           textFormat: Text.PlainText
@@ -240,7 +267,9 @@ Panel {
           opacity: 0.75
           font.family: root.fontFamily
           font.pixelSize: Style.font.bodySmall
-          text: !root.installed
+          text: root.actionError !== "" && root.installed && root.connected
+            ? root.actionError
+            : !root.installed
             ? "This widget drives the Lighting app. Install it from github.com/cylon58/lighting, then reopen this panel."
             : (root.state.problem !== "" ? root.state.problem : "Start OpenRGB with: systemctl --user start lighting-server")
         }

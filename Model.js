@@ -45,16 +45,51 @@ function parseStatus(exitCode, text) {
 // bulb and the main switch match what the PC actually shows.
 function anyLit(state) {
   if (!state.masterOn) return false
-  if (state.devices.length === 0) return true
-  for (var i = 0; i < state.devices.length; i++) if (state.devices[i].on) return true
+  if (state.devices.length === 0) return state.brightness > 0
+  for (var i = 0; i < state.devices.length; i++)
+    if (state.devices[i].on && state.devices[i].brightness > 0) return true
   return false
 }
 
 function litCount(state) {
   if (!state.masterOn) return 0
   var n = 0
-  for (var i = 0; i < state.devices.length; i++) if (state.devices[i].on) n++
+  for (var i = 0; i < state.devices.length; i++)
+    if (state.devices[i].on && state.devices[i].brightness > 0) n++
   return n
+}
+
+// What the panel shows right after the master switch is flipped, before the
+// next status read: `lighting on` brings every device back too, and a
+// device's `on` in the status already includes the master switch.
+function withMaster(state, on) {
+  var next = {}
+  for (var k in state) next[k] = state[k]
+  next.masterOn = on
+  next.devices = state.devices.map(function(d) {
+    var copy = {}
+    for (var key in d) copy[key] = d[key]
+    copy.on = on
+    return copy
+  })
+  return next
+}
+
+// Adds a command to the waiting list. Brightness changes replace a waiting
+// brightness change (only the newest level matters); everything else keeps
+// its place, so a color or a device switch is never dropped.
+function enqueue(queue, args) {
+  var next = queue.slice()
+  if (args[0] === "set" && args[1] === "--brightness") {
+    for (var i = 0; i < next.length; i++) {
+      if (next[i][0] === "set" && next[i][1] === "--brightness") {
+        next[i] = args
+        return next
+      }
+    }
+  }
+  next.push(args)
+  return next
 }
 
 // The color every device shares, or "" when they differ.
@@ -114,6 +149,8 @@ if (typeof module !== "undefined") {
     brightnessSummary: brightnessSummary,
     statusText: statusText,
     dotRgb: dotRgb,
-    clampBrightness: clampBrightness
+    clampBrightness: clampBrightness,
+    withMaster: withMaster,
+    enqueue: enqueue
   }
 }
