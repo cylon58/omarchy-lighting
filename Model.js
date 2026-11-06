@@ -104,6 +104,25 @@ function setBrightnessForAll(settings, level) {
   return next
 }
 
+// One device's color or brightness; an empty key means every device.
+function setColorFor(settings, key, hex) {
+  if (!key) return setColorForAll(settings, hex)
+  var next = copySettings(settings)
+  var look = lookFor(next, key)
+  look.color = normalColor(hex, look.color)
+  next.devices[key] = look
+  return next
+}
+
+function setBrightnessFor(settings, key, level) {
+  if (!key) return setBrightnessForAll(settings, level)
+  var next = copySettings(settings)
+  var look = lookFor(next, key)
+  look.brightness = clampBrightness(level)
+  next.devices[key] = look
+  return next
+}
+
 // ---------- OpenRGB's device list ----------
 
 var TYPE_LABELS = {
@@ -297,6 +316,8 @@ if (typeof module !== "undefined") {
     setDevice: setDevice,
     setColorForAll: setColorForAll,
     setBrightnessForAll: setBrightnessForAll,
+    setColorFor: setColorFor,
+    setBrightnessFor: setBrightnessFor,
     clampBrightness: clampBrightness,
     parseDeviceList: parseDeviceList,
     outputHex: outputHex,

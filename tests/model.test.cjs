@@ -173,3 +173,13 @@ test("brightness is clamped to 0-100", () => {
   assert.equal(Model.clampBrightness(-5), 0)
   assert.equal(Model.clampBrightness("42.6"), 43)
 })
+
+test("one device's color and brightness leave the others alone", () => {
+  let s = Model.parseSettings(appState)
+  s = Model.setColorFor(s, "EVGA GeForce RTX 3090 Ti FTW3 Gaming", "#8c00ff")
+  s = Model.setBrightnessFor(s, "EVGA GeForce RTX 3090 Ti FTW3 Gaming", 50)
+  assert.equal(Model.outputHex(s, "EVGA GeForce RTX 3090 Ti FTW3 Gaming"), "460080")
+  assert.equal(Model.outputHex(s, "Razer Cynosa Chroma"), "910000")
+  assert.equal(Model.outputHex(s, "Kingston Fury"), "00e5ff")
+  assert.equal(Model.setColorFor(s, "", "#ffffff").devices["Razer Cynosa Chroma"].color, "#ffffff", "an empty key means all")
+})

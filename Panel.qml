@@ -49,7 +49,17 @@ Panel {
   readonly property string commonColor: Model.commonColor(lights)
   readonly property var brightnessInfo: Model.brightnessSummary(lights)
   readonly property string statusText: status === "unknown" ? "…" : Model.statusText(lights)
-  readonly property int brightness: brightnessInfo.value
+  // The device the slider and colors adjust on its own; "" adjusts all.
+  property string selected: ""
+  readonly property var selectedDevice: {
+    for (var i = 0; i < devices.length; i++) if (devices[i].key === selected) return devices[i]
+    return null
+  }
+  // A selected device that's gone (unplugged) falls back to all.
+  onSelectedDeviceChanged: if (selected !== "" && !selectedDevice && status === "ready") selected = ""
+  readonly property int brightness: selectedDevice ? selectedDevice.brightness : brightnessInfo.value
+  readonly property string pickedColor: selectedDevice ? selectedDevice.color : commonColor
+  function select(key) { selected = selected === key ? "" : key }
 
   readonly property var presets: ["#ffffff", "#ffb36b", "#ff0000", "#ff6a00", "#ffd000",
                                   "#00ff3c", "#00e5ff", "#0040ff", "#8c00ff", "#ff2fa8"]
@@ -74,8 +84,8 @@ Panel {
   }
   function setMaster(on) { change(Model.setMaster(saved, on)) }
   function setDevice(key, on) { change(Model.setDevice(saved, key, on)) }
-  function setBrightness(level) { change(Model.setBrightnessForAll(saved, level)) }
-  function setColor(hex) { change(Model.setColorForAll(saved, hex)) }
+  function setBrightness(level) { change(Model.setBrightnessFor(saved, selected, level)) }
+  function setColor(hex) { change(Model.setColorFor(saved, selected, hex)) }
 
   property bool sendAgain: false
   function send() {
@@ -409,14 +419,64 @@ Panel {
           width: parent.width
           spacing: Style.space(8)
 
-          PanelSectionHeader { text: "Devices"; foreground: root.foreground; fontFamily: root.fontFamily }
+          Item {
+            width: parent.width
+            implicitHeight: devicesHeader.implicitHeight
+            PanelSectionHeader {
+              id: devicesHeader
+              anchors.left: parent.left
+              text: "Devices"
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+            }
+            Text {
+              id: allButton
+              anchors.right: parent.right
+              anchors.verticalCenter: devicesHeader.verticalCenter
+              text: "All"
+              textFormat: Text.PlainText
+              color: root.foreground
+              opacity: root.selected === "" ? 1 : 0.6
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              font.bold: root.selected === ""
+              MouseArea {
+                anchors.fill: parent
+                anchors.margins: -Style.space(6)
+                cursorShape: Qt.PointingHandCursor
+                onClicked: root.selected = ""
+              }
+            }
+          }
 
+          // Clicking a device's name picks it for the slider and colors
+          // below; clicking it again (or All) goes back to every device.
           Repeater {
             model: root.devices
             Item {
+              id: deviceRow
               required property var modelData
+              readonly property bool picked: root.selected === modelData.key
               width: parent.width
-              implicitHeight: deviceSwitch.implicitHeight
+              implicitHeight: deviceSwitch.implicitHeight + Style.space(8)
+
+              Rectangle {
+                anchors.fill: parent
+                anchors.leftMargin: -Style.space(8)
+                radius: Math.min(6, Style.space(6))
+                color: root.foreground
+                opacity: deviceRow.picked ? 0.12 : rowMouse.containsMouse ? 0.06 : 0
+              }
+              MouseArea {
+                id: rowMouse
+                anchors.left: parent.left
+                anchors.top: parent.top
+                anchors.bottom: parent.bottom
+                anchors.right: deviceSwitch.left
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: root.select(deviceRow.modelData.key)
+              }
 
               Rectangle {
                 id: dot
@@ -437,6 +497,7 @@ Panel {
                 color: root.foreground
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.body
+                font.bold: deviceRow.picked
               }
               ToggleSwitch {
                 id: deviceSwitch
@@ -462,14 +523,14 @@ Panel {
             PanelSectionHeader {
               id: brightnessHeader
               anchors.left: parent.left
-              text: "Brightness"
+              text: root.selectedDevice ? "Brightness · " + root.selectedDevice.label : "Brightness"
               foreground: root.foreground
               fontFamily: root.fontFamily
             }
             Text {
               anchors.right: parent.right
               anchors.verticalCenter: brightnessHeader.verticalCenter
-              text: root.brightnessInfo.mixed ? "Mixed" : root.brightness + "%"
+              text: !root.selectedDevice && root.brightnessInfo.mixed ? "Mixed" : root.brightness + "%"
               textFormat: Text.PlainText
               color: root.foreground
               font.family: root.fontFamily
@@ -495,7 +556,7 @@ Panel {
           width: parent.width
           spacing: Style.space(8)
 
-          PanelSectionHeader { text: "Color"; foreground: root.foreground; fontFamily: root.fontFamily }
+          PanelSectionHeader { text: root.selectedDevice ? "Color · " + root.selectedDevice.label : "Color"; foreground: root.foreground; fontFamily: root.fontFamily }
 
           Row {
             id: swatches
@@ -509,7 +570,7 @@ Panel {
                 required property string modelData
                 width: swatches.cell
                 height: swatches.cell
-                readonly property bool picked: root.commonColor === modelData
+                readonly property bool picked: root.pickedColor === modelData
 
                 Rectangle {
                   anchors.centerIn: parent
