@@ -26,9 +26,10 @@ afterwards so every device is reachable.
 | Right-click | All lights on or off |
 | Scroll | Brighter or dimmer |
 
-In the panel, the top switch is the master switch, each device has its own
-switch, and the slider and colors apply to every device. Brightness reads
-"Mixed" when devices differ; moving it sets them all. Turning everything off
+In the panel, the top switch is the master switch and each device has its own
+switch. The slider and colors apply to every device; click a device's name to
+adjust just that one, and click it again (or All) to go back. Brightness reads
+"Mixed" when devices differ; moving it with All picked sets them all. Turning everything off
 keeps each device's look, so it comes back the same.
 
 Devices OpenRGB finds with no LEDs set up (an empty motherboard header) get no
