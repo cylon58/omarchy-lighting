@@ -39,7 +39,10 @@ switch. To use one, set its size once in the OpenRGB app.
 
 - Starts OpenRGB's server when nothing is listening on its port (127.0.0.1:6742), as
   the user service `cylon58-lighting-openrgb`, which lasts until you log out.
-  An OpenRGB server you already run is used as it is.
+  It keeps its own OpenRGB settings in `~/.local/state/omarchy-lighting/openrgb`,
+  with Philips Hue and Nanoleaf detection off, because any account on the PC
+  can read a running server's settings and the OpenRGB app's can hold their
+  pairing keys. An OpenRGB server you already run is used as it is.
 - Runs `openrgb -ld` to list devices: every 2 seconds for a minute after
   OpenRGB starts, every 3 seconds while the panel is open, and once a minute
   otherwise. When the list changes (at login, after a replug), OpenRGB
