@@ -163,15 +163,24 @@ Panel {
   // answering yet (it takes a few seconds to find the hardware), after
   // printing "started" if this check started it; 70: couldn't start; 124:
   // OpenRGB didn't answer in time.
+  //
+  // The server it starts keeps its own settings folder, not the OpenRGB
+  // app's: any local account can ask the server for its settings, and the
+  // app's can hold Philips Hue or Nanoleaf pairing keys. Those two network
+  // detectors are switched off there so no pairing is ever saved in it.
   Process {
     id: checkProc
     command: ["bash", "-c",
       "mkdir -p \"$1\"; command -v openrgb >/dev/null 2>&1 || exit 127; " +
+      "cfg=\"$1/openrgb\"; " +
       "if ! ss -Hltn \"sport = :6742\" | grep -q .; then " +
       "  if ! systemctl --user -q is-active cylon58-lighting-openrgb.service; then " +
       "    systemctl --user reset-failed cylon58-lighting-openrgb.service 2>/dev/null; " +
+      "    if [ ! -e \"$cfg/OpenRGB.json\" ]; then " +
+      "      mkdir -p -m 700 \"$cfg\" && printf '%s\\n' '{\"Detectors\":{\"detectors\":{\"Philips Hue\":false,\"Nanoleaf\":false}}}' > \"$cfg/OpenRGB.json\"; " +
+      "    fi; " +
       "    systemd-run --user --quiet --unit=cylon58-lighting-openrgb --setenv=QT_QPA_PLATFORM=offscreen " +
-      "      openrgb --server --server-host 127.0.0.1 --noautoconnect || exit 70; " +
+      "      openrgb --config \"$cfg\" --server --server-host 127.0.0.1 --noautoconnect || exit 70; " +
       "    echo started; " +
       "  fi; exit 75; " +
       "fi; " +
